@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: morgul-tech/Cerebro-Source-1.0
-          ref: 98f1cb249cf2a19621d209715a4eca968541c9b4
+          ref: e7572a5474f599419a03e2d0fb853e1f592f5bde
           fetch-depth: 0
           path: fixture
 
@@ -110,7 +110,7 @@ jobs:
           }
 
           $fixture = Join-Path $PWD 'fixture'
-          $baseline = '98f1cb249cf2a19621d209715a4eca968541c9b4'
+          $baseline = 'e7572a5474f599419a03e2d0fb853e1f592f5bde'
 
           function Reset-Fixture {
             git -C $fixture reset --hard $baseline | Out-Null
