@@ -7,10 +7,10 @@ on:
         description: Exact uncompressed candidate SHA256
         required: true
         type: string
-      payload_gzip_base64:
-        description: GZIP + Base64 sealed Level-3 payload
-        required: true
-        type: string
+      payload_gzip_hex:
+  description: GZIP + HEX sealed Level-3 payload
+  required: true
+  type: string
 
 permissions:
   contents: read
@@ -39,17 +39,27 @@ jobs:
             throw 'EXPECTED_SHA256_INVALID'
           }
 
-          $sealed = @'
-          ${{ inputs.payload_gzip_base64 }}
-          '@
+         $sealedHex = @'
+${{ inputs.payload_gzip_hex }}
+'@
 
-          $sealed = $sealed.Trim()
+$sealedHex = ($sealedHex -replace '\s','').ToLowerInvariant()
 
-          if ($sealed -notmatch '^[A-Za-z0-9+/=]+$') {
-            throw 'SEALED_PAYLOAD_INVALID'
-          }
+if (
+  $sealedHex -notmatch '^[0-9a-f]+$' -or
+  ($sealedHex.Length % 2) -ne 0
+) {
+  throw 'SEALED_HEX_INVALID'
+}
 
-          $compressed = [Convert]::FromBase64String($sealed)
+$compressed = [byte[]]::new($sealedHex.Length / 2)
+
+for ($i = 0; $i -lt $compressed.Length; $i++) {
+  $compressed[$i] = [Convert]::ToByte(
+    $sealedHex.Substring($i * 2, 2),
+    16
+  )
+}
 
           $inputStream = [IO.MemoryStream]::new($compressed)
           $gzip = [IO.Compression.GZipStream]::new(
