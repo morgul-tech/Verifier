@@ -1,0 +1,105 @@
+name: PowerShell Capability Proof
+
+on:
+  workflow_dispatch:
+
+jobs:
+  capability-proof:
+    runs-on: windows-2022
+
+    steps:
+      - name: Verify PowerShell capability
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $receipt = [ordered]@{
+            verifier        = 'CEREBRO-PS-CAPABILITY-001'
+            engine          = $PSVersionTable.PSEdition
+            version         = $PSVersionTable.PSVersion.ToString()
+            parser_positive = $false
+            parser_negative = $false
+            execution       = $false
+            exit_code       = $false
+            stdout_stderr   = $false
+            temp_git        = $false
+            overall         = 'FAIL'
+          }
+
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput(
+            'Write-Output "OK"',
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          $receipt.parser_positive = ($errors.Count -eq 0)
+
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput(
+            'if (',
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          $receipt.parser_negative = ($errors.Count -gt 0)
+
+          $result = & { Write-Output 'EXEC_OK' }
+          $receipt.execution = ($result -eq 'EXEC_OK')
+
+          $pwsh = Join-Path $PSHOME 'pwsh.exe'
+          & $pwsh -NoLogo -NoProfile -Command 'exit 7'
+          $receipt.exit_code = ($LASTEXITCODE -eq 7)
+
+          $out = Join-Path $env:RUNNER_TEMP 'stdout.txt'
+          $err = Join-Path $env:RUNNER_TEMP 'stderr.txt'
+
+          & $pwsh -NoLogo -NoProfile -Command `
+            'Write-Output "OUT"; [Console]::Error.WriteLine("ERR")' `
+            1> $out 2> $err
+
+          $receipt.stdout_stderr =
+            ((Get-Content $out -Raw).Trim() -eq 'OUT') -and
+            ((Get-Content $err -Raw).Trim() -eq 'ERR')
+
+          $repo = Join-Path $env:RUNNER_TEMP 'cerebro-verifier-git'
+          New-Item -ItemType Directory -Path $repo | Out-Null
+
+          git -C $repo init | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'git init failed' }
+
+          git -C $repo config user.email 'verifier@cerebro.invalid'
+          git -C $repo config user.name 'Cerebro Verifier'
+
+          Set-Content -Path (Join-Path $repo 'canary.txt') -Value 'PASS'
+          git -C $repo add canary.txt
+          git -C $repo commit -m 'Capability canary' | Out-Null
+
+          $receipt.temp_git = ($LASTEXITCODE -eq 0)
+
+          $checks = @(
+            $receipt.parser_positive,
+            $receipt.parser_negative,
+            $receipt.execution,
+            $receipt.exit_code,
+            $receipt.stdout_stderr,
+            $receipt.temp_git
+          )
+
+          if ($checks -notcontains $false) {
+            $receipt.overall = 'PASS'
+          }
+
+          $receipt |
+            ConvertTo-Json -Depth 4 |
+            Tee-Object -FilePath capability-receipt.json
+
+          if ($receipt.overall -ne 'PASS') {
+            exit 1
+          }
+
+      - name: Upload receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: powershell-capability-receipt
+          path: capability-receipt.json
