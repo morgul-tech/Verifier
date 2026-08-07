@@ -142,7 +142,7 @@ jobs:
           }
 
           $result = [ordered]@{
-            verifier                  = 'CEREBRO-EXACT-L3-004'
+            verifier                  = 'CEREBRO-EXACT-L3-005'
             verifier_engine           = $PSVersionTable.PSEdition
             verifier_version          = $PSVersionTable.PSVersion.ToString()
             candidate_runtime         = 'Windows PowerShell'
