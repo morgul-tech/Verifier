@@ -8,9 +8,9 @@ on:
         required: true
         type: string
       payload_gzip_hex:
-  description: GZIP + HEX sealed Level-3 payload
-  required: true
-  type: string
+        description: GZIP + HEX sealed Level-3 payload
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -39,27 +39,23 @@ jobs:
             throw 'EXPECTED_SHA256_INVALID'
           }
 
-         $sealedHex = @'
-${{ inputs.payload_gzip_hex }}
-'@
+          $sealedHex = '${{ inputs.payload_gzip_hex }}'.Trim().ToLowerInvariant()
 
-$sealedHex = ($sealedHex -replace '\s','').ToLowerInvariant()
+          if (
+            $sealedHex -notmatch '^[0-9a-f]+$' -or
+            ($sealedHex.Length % 2) -ne 0
+          ) {
+            throw 'SEALED_HEX_INVALID'
+          }
 
-if (
-  $sealedHex -notmatch '^[0-9a-f]+$' -or
-  ($sealedHex.Length % 2) -ne 0
-) {
-  throw 'SEALED_HEX_INVALID'
-}
+          $compressed = [byte[]]::new($sealedHex.Length / 2)
 
-$compressed = [byte[]]::new($sealedHex.Length / 2)
-
-for ($i = 0; $i -lt $compressed.Length; $i++) {
-  $compressed[$i] = [Convert]::ToByte(
-    $sealedHex.Substring($i * 2, 2),
-    16
-  )
-}
+          for ($i = 0; $i -lt $compressed.Length; $i++) {
+            $compressed[$i] = [Convert]::ToByte(
+              $sealedHex.Substring($i * 2, 2),
+              16
+            )
+          }
 
           $inputStream = [IO.MemoryStream]::new($compressed)
           $gzip = [IO.Compression.GZipStream]::new(
@@ -131,19 +127,19 @@ for ($i = 0; $i -lt $compressed.Length; $i++) {
           }
 
           $result = [ordered]@{
-            verifier              = 'CEREBRO-EXACT-L3-002'
-            engine                = $PSVersionTable.PSEdition
-            version               = $PSVersionTable.PSVersion.ToString()
-            candidate_sha256      = $actualHash
+            verifier                = 'CEREBRO-EXACT-L3-003'
+            engine                  = $PSVersionTable.PSEdition
+            version                 = $PSVersionTable.PSVersion.ToString()
+            candidate_sha256        = $actualHash
             transport_reconstructed = $true
-            parser                = $true
-            success               = $false
-            dirty_tree            = $false
-            wrong_branch          = $false
-            wrong_baseline        = $false
-            rollback              = $false
-            duplicate_execution   = $false
-            overall               = 'FAIL'
+            parser                  = $true
+            success                 = $false
+            dirty_tree              = $false
+            wrong_branch            = $false
+            wrong_baseline          = $false
+            rollback                = $false
+            duplicate_execution     = $false
+            overall                 = 'FAIL'
           }
 
           Reset-Fixture
@@ -226,6 +222,7 @@ for ($i = 0; $i -lt $compressed.Length; $i++) {
           if ($result.overall -ne 'PASS') {
             exit 1
           }
+
           exit 0
 
       - name: Upload verifier receipt
