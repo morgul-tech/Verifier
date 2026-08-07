@@ -1,0 +1,204 @@
+name: Verify Exact Level 3
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha256:
+        description: Exact candidate SHA256
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout verifier
+        uses: actions/checkout@v4
+
+      - name: Checkout authoritative baseline
+        uses: actions/checkout@v4
+        with:
+          repository: morgul-tech/Cerebro-Source-1.0
+          ref: 98f1cb249cf2a19621d209715a4eca968541c9b4
+          fetch-depth: 0
+          path: fixture
+
+      - name: Verify exact Level 3 payload
+        shell: pwsh
+        env:
+          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $candidate = Join-Path $PWD 'candidate.ps1'
+          $fixture = Join-Path $PWD 'fixture'
+          $baseline = '98f1cb249cf2a19621d209715a4eca968541c9b4'
+
+          if (-not (Test-Path $candidate -PathType Leaf)) {
+            throw 'CANDIDATE_MISSING'
+          }
+
+          $actualHash = (Get-FileHash $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:EXPECTED_SHA256.ToLowerInvariant()) {
+            throw "HASH_MISMATCH:$actualHash"
+          }
+
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            $candidate,
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+
+          if ($errors.Count -ne 0) {
+            throw ('PARSE_FAILED:' + ($errors.Message -join ' | '))
+          }
+
+          $source = Get-Content $candidate -Raw
+          foreach ($pattern in @(
+            'Invoke-Expression',
+            'iex ',
+            'Add-Type'
+          )) {
+            if ($source -match [regex]::Escape($pattern)) {
+              throw "PROHIBITED_CONSTRUCT:$pattern"
+            }
+          }
+
+          function Reset-Fixture {
+            git -C $fixture reset --hard $baseline | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'RESET_FAILED' }
+
+            git -C $fixture clean -fd | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'CLEAN_FAILED' }
+
+            git -C $fixture checkout -B main $baseline | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'BRANCH_RESET_FAILED' }
+          }
+
+          function Invoke-Candidate {
+            $old = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+
+            try {
+              $output = & pwsh -NoLogo -NoProfile -File $candidate `
+                -RepoPath $fixture `
+                -ExpectedBranch main `
+                -ExpectedBase $baseline 2>&1
+
+              $code = $LASTEXITCODE
+            }
+            finally {
+              $ErrorActionPreference = $old
+            }
+
+            [pscustomobject]@{
+              ExitCode = $code
+              Output = ($output -join "`n")
+            }
+          }
+
+          $result = [ordered]@{
+            verifier = 'CEREBRO-EXACT-L3-001'
+            engine = $PSVersionTable.PSEdition
+            version = $PSVersionTable.PSVersion.ToString()
+            candidate_sha256 = $actualHash
+            parser = $true
+            success = $false
+            dirty_tree = $false
+            wrong_branch = $false
+            wrong_baseline = $false
+            rollback = $false
+            duplicate_execution = $false
+            overall = 'FAIL'
+          }
+
+          Reset-Fixture
+          $success = Invoke-Candidate
+
+          if ($success.ExitCode -ne 0) {
+            throw "SUCCESS_SCENARIO_FAILED:$($success.Output)"
+          }
+
+          $successReceipt = $success.Output | ConvertFrom-Json
+
+          if (
+            $successReceipt.state -ne 'PASS' -or
+            -not $successReceipt.validation
+          ) {
+            throw 'SUCCESS_RECEIPT_INVALID'
+          }
+
+          $result.success = $true
+
+          Reset-Fixture
+          Set-Content (Join-Path $fixture 'dirty.tmp') 'dirty'
+          $dirty = Invoke-Candidate
+          $result.dirty_tree = ($dirty.ExitCode -ne 0)
+
+          Reset-Fixture
+          git -C $fixture checkout --detach $baseline | Out-Null
+          $wrongBranch = Invoke-Candidate
+          $result.wrong_branch = ($wrongBranch.ExitCode -ne 0)
+
+          Reset-Fixture
+          git -C $fixture config user.email 'verifier@cerebro.invalid'
+          git -C $fixture config user.name 'Cerebro Verifier'
+          Set-Content (Join-Path $fixture 'baseline.tmp') 'different'
+          git -C $fixture add baseline.tmp
+          git -C $fixture commit -m 'wrong baseline canary' | Out-Null
+          $wrongBaseline = Invoke-Candidate
+          $result.wrong_baseline = ($wrongBaseline.ExitCode -ne 0)
+
+          Reset-Fixture
+          $env:CEREBRO_PRE002_VERIFIER_FAULT_AFTER_WRITE = '1'
+          $rollback = Invoke-Candidate
+          Remove-Item Env:CEREBRO_PRE002_VERIFIER_FAULT_AFTER_WRITE
+
+          $rollbackState = git -C $fixture status --porcelain
+          $result.rollback =
+            ($rollback.ExitCode -ne 0) -and
+            ([string]::IsNullOrWhiteSpace(($rollbackState -join '')))
+
+          Reset-Fixture
+          $first = Invoke-Candidate
+
+          if ($first.ExitCode -ne 0) {
+            throw 'DUPLICATE_SETUP_FAILED'
+          }
+
+          $second = Invoke-Candidate
+          $result.duplicate_execution = ($second.ExitCode -ne 0)
+
+          $checks = @(
+            $result.parser
+            $result.success
+            $result.dirty_tree
+            $result.wrong_branch
+            $result.wrong_baseline
+            $result.rollback
+            $result.duplicate_execution
+          )
+
+          if ($checks -notcontains $false) {
+            $result.overall = 'PASS'
+          }
+
+          $result |
+            ConvertTo-Json -Depth 6 |
+            Tee-Object exact-level3-receipt.json
+
+          if ($result.overall -ne 'PASS') {
+            exit 1
+          }
+
+      - name: Upload verifier receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-level3-receipt
+          path: exact-level3-receipt.json
