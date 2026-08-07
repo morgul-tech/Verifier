@@ -216,6 +216,7 @@ jobs:
           if ($result.overall -ne 'PASS') {
             exit 1
           }
+          exit 0
 
       - name: Upload verifier receipt
         uses: actions/upload-artifact@v4
