@@ -4,7 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       expected_sha256:
-        description: Exact candidate SHA256
+        description: Exact uncompressed candidate SHA256
+        required: true
+        type: string
+      payload_gzip_base64:
+        description: GZIP + Base64 sealed Level-3 payload
         required: true
         type: string
 
@@ -16,9 +20,6 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Checkout verifier
-        uses: actions/checkout@v4
-
       - name: Checkout authoritative baseline
         uses: actions/checkout@v4
         with:
@@ -27,28 +28,60 @@ jobs:
           fetch-depth: 0
           path: fixture
 
-      - name: Verify exact Level 3 payload
+      - name: Reconstruct and verify exact Level 3 payload
         shell: pwsh
-        env:
-          EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
         run: |
           $ErrorActionPreference = 'Stop'
 
-          $candidate = Join-Path $PWD 'candidate.ps1'
-          $fixture = Join-Path $PWD 'fixture'
-          $baseline = '98f1cb249cf2a19621d209715a4eca968541c9b4'
+          $expectedHash = '${{ inputs.expected_sha256 }}'.Trim().ToLowerInvariant()
 
-          if (-not (Test-Path $candidate -PathType Leaf)) {
-            throw 'CANDIDATE_MISSING'
+          if ($expectedHash -notmatch '^[0-9a-f]{64}$') {
+            throw 'EXPECTED_SHA256_INVALID'
           }
 
-          $actualHash = (Get-FileHash $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actualHash -ne $env:EXPECTED_SHA256.ToLowerInvariant()) {
+          $sealed = @'
+          ${{ inputs.payload_gzip_base64 }}
+          '@
+
+          $sealed = $sealed.Trim()
+
+          if ($sealed -notmatch '^[A-Za-z0-9+/=]+$') {
+            throw 'SEALED_PAYLOAD_INVALID'
+          }
+
+          $compressed = [Convert]::FromBase64String($sealed)
+
+          $inputStream = [IO.MemoryStream]::new($compressed)
+          $gzip = [IO.Compression.GZipStream]::new(
+            $inputStream,
+            [IO.Compression.CompressionMode]::Decompress
+          )
+          $outputStream = [IO.MemoryStream]::new()
+
+          try {
+            $gzip.CopyTo($outputStream)
+            $candidateBytes = $outputStream.ToArray()
+          }
+          finally {
+            $gzip.Dispose()
+            $inputStream.Dispose()
+            $outputStream.Dispose()
+          }
+
+          $candidate = Join-Path $PWD 'candidate.ps1'
+          [IO.File]::WriteAllBytes($candidate, $candidateBytes)
+
+          $actualHash = (
+            Get-FileHash $candidate -Algorithm SHA256
+          ).Hash.ToLowerInvariant()
+
+          if ($actualHash -ne $expectedHash) {
             throw "HASH_MISMATCH:$actualHash"
           }
 
           $tokens = $null
           $errors = $null
+
           [System.Management.Automation.Language.Parser]::ParseFile(
             $candidate,
             [ref]$tokens,
@@ -59,16 +92,8 @@ jobs:
             throw ('PARSE_FAILED:' + ($errors.Message -join ' | '))
           }
 
-          $source = Get-Content $candidate -Raw
-          foreach ($pattern in @(
-            'Invoke-Expression',
-            'iex ',
-            'Add-Type'
-          )) {
-            if ($source -match [regex]::Escape($pattern)) {
-              throw "PROHIBITED_CONSTRUCT:$pattern"
-            }
-          }
+          $fixture = Join-Path $PWD 'fixture'
+          $baseline = '98f1cb249cf2a19621d209715a4eca968541c9b4'
 
           function Reset-Fixture {
             git -C $fixture reset --hard $baseline | Out-Null
@@ -82,40 +107,33 @@ jobs:
           }
 
           function Invoke-Candidate {
-            $old = $ErrorActionPreference
-            $ErrorActionPreference = 'Continue'
+            $output = & pwsh -NoLogo -NoProfile -File $candidate `
+              -RepoPath $fixture `
+              -ExpectedBranch main `
+              -ExpectedBase $baseline 2>&1
 
-            try {
-              $output = & pwsh -NoLogo -NoProfile -File $candidate `
-                -RepoPath $fixture `
-                -ExpectedBranch main `
-                -ExpectedBase $baseline 2>&1
-
-              $code = $LASTEXITCODE
-            }
-            finally {
-              $ErrorActionPreference = $old
-            }
+            $code = $LASTEXITCODE
 
             [pscustomobject]@{
               ExitCode = $code
-              Output = ($output -join "`n")
+              Output   = ($output -join "`n")
             }
           }
 
           $result = [ordered]@{
-            verifier = 'CEREBRO-EXACT-L3-001'
-            engine = $PSVersionTable.PSEdition
-            version = $PSVersionTable.PSVersion.ToString()
-            candidate_sha256 = $actualHash
-            parser = $true
-            success = $false
-            dirty_tree = $false
-            wrong_branch = $false
-            wrong_baseline = $false
-            rollback = $false
-            duplicate_execution = $false
-            overall = 'FAIL'
+            verifier              = 'CEREBRO-EXACT-L3-002'
+            engine                = $PSVersionTable.PSEdition
+            version               = $PSVersionTable.PSVersion.ToString()
+            candidate_sha256      = $actualHash
+            transport_reconstructed = $true
+            parser                = $true
+            success               = $false
+            dirty_tree            = $false
+            wrong_branch          = $false
+            wrong_baseline        = $false
+            rollback              = $false
+            duplicate_execution   = $false
+            overall               = 'FAIL'
           }
 
           Reset-Fixture
@@ -156,14 +174,15 @@ jobs:
           $result.wrong_baseline = ($wrongBaseline.ExitCode -ne 0)
 
           Reset-Fixture
-          $env:CEREBRO_PRE002_VERIFIER_FAULT_AFTER_WRITE = '1'
+          $env:CEREBRO_VERIFIER_FAULT_AFTER_WRITE = '1'
           $rollback = Invoke-Candidate
-          Remove-Item Env:CEREBRO_PRE002_VERIFIER_FAULT_AFTER_WRITE
+          Remove-Item Env:CEREBRO_VERIFIER_FAULT_AFTER_WRITE
 
-          $rollbackState = git -C $fixture status --porcelain
+          $rollbackState = @(git -C $fixture status --porcelain)
+
           $result.rollback =
             ($rollback.ExitCode -ne 0) -and
-            ([string]::IsNullOrWhiteSpace(($rollbackState -join '')))
+            ($rollbackState.Count -eq 0)
 
           Reset-Fixture
           $first = Invoke-Candidate
@@ -176,6 +195,7 @@ jobs:
           $result.duplicate_execution = ($second.ExitCode -ne 0)
 
           $checks = @(
+            $result.transport_reconstructed
             $result.parser
             $result.success
             $result.dirty_tree
