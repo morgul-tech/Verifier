@@ -240,10 +240,17 @@ jobs:
           Remove-Item Env:CEREBRO_VERIFIER_FAULT_AFTER_WRITE
 
           $rollbackState = @(git -C $fixture status --porcelain)
+          $rollbackStateExit = $LASTEXITCODE
+          $rollbackHead = @(git -C $fixture rev-parse --verify HEAD)
+          $rollbackHeadExit = $LASTEXITCODE
 
           $result.rollback =
             ($rollback.ExitCode -ne 0) -and
-            ($rollbackState.Count -eq 0)
+            ($rollbackStateExit -eq 0) -and
+            ($rollbackState.Count -eq 0) -and
+            ($rollbackHeadExit -eq 0) -and
+            ($rollbackHead.Count -eq 1) -and
+            ($rollbackHead[0].Trim().ToLowerInvariant() -eq $baseline)
 
           Reset-Fixture
           $first = Invoke-Candidate
